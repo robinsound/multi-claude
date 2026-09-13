@@ -1,0 +1,24 @@
+What I found on this machine. claude alt works through a claude() shell function in ~/.local/bin/env that runs the binary with CLAUDE_CONFIG_DIR=~/.claude-alt. Both ~/.claude and ~/.claude-alt symlink CLAUDE.md, settings.json, hooks, commands,
+  rules and skills into ~/.claude-shared. Main is robin@attention.tech, alt is robin.claude@attention.tech. Main's state file is ~/.claude.json, alt's is inside its config dir.
+
+  Deliverables
+
+  - setup-multi-claude.sh runs on the new VM. Its install command installs Claude Code with the official native installer if missing, creates the shared dir, wires main plus any profiles, writes a bash/zsh-compatible wrapper, adds one managed block
+    to the rc files, and installs itself as claude-profiles. It is idempotent and never deletes: conflicting local files become .bak-<timestamp>. Subcommands: status (which account each profile is logged in as), doctor (verifies wiring, hooks,
+    symlinks), add-profile, sync-mcp, link-memory, exec for cron and non-interactive ssh, --dry-run.
+  - export-shared-bundle.sh runs here and packs ~/.claude-shared without credentials. The importer rewrites /home/ubuntu paths to the new home in scripts, JSON and symlinks, and leaves Markdown prose alone.
+  - RUNBOOK.md covers install, headless login, daily use, adding a third account, MCP and memory sharing, troubleshooting, and uninstall. README.md is a short index.
+  - tests/run-tests.sh is a sandboxed harness with a fake HOME, fake claude and fake curl, per your destructive-script rule. It refuses to run against a real home.
+
+  Verification loop. Four iterations. Fixes along the way: a quoting typo, a read loop with IFS= that silently emptied the doctor's hook check, a path regex that grabbed } and :$PATH fragments, and prose rewriting in Markdown. Final state: 186
+  checks pass in about 4 seconds, shellcheck is clean on both scripts, and importing this machine's real shared config into a foreign home gives a passing doctor whose only warnings are genuine (statusline binary absent, two repo-path skills
+  dangling, one hook hardcoding /home/robin).
+
+  To use it on the other VM
+
+  cd ~/robin/multi-claude && ./export-shared-bundle.sh      # optional
+  scp setup-multi-claude.sh multi-claude-shared-*.tar.gz <user>@<vm>:~/
+  ssh <user>@<vm> 'bash ~/setup-multi-claude.sh install --bundle ~/multi-claude-shared-*.tar.gz'
+  # then on the VM: exec $SHELL -l; claude (/login); claude alt (/login); claude-profiles status
+
+  Two things I could not test here: the real OAuth login on a fresh host, and the real installer download (the harness stubs both). The runbook walks through the headless login flow.
