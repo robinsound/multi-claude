@@ -416,6 +416,128 @@ if command -v shellcheck >/dev/null 2>&1; then
 else pass "skipped"; fi
 
 # ======================================================================================
+echo "[T14] share-sessions: one peer-session registry for every account (sixth home)"
+export HOME="$SANDBOX/home6"; mkdir -p "$HOME"; touch "$HOME/.bashrc"; export SHELL=/bin/bash
+export PATH="$SHIM_CLAUDE:$SHIM_CURL:$SYS_PATH"
+bash "$SETUP" install --no-install --profiles alt,work >/dev/null 2>&1 || failt "install for T14 failed"
+# fake live registries as Claude Code writes them: <pid>.json + <pid>.<hash>.key (0600)
+mkdir -m 0700 "$HOME/.claude/sessions" "$HOME/.claude-alt/sessions"
+printf '{"pid":111,"name":"main-a"}\n' > "$HOME/.claude/sessions/111.json"
+(umask 077; printf '{"peerToken":"x"}\n' > "$HOME/.claude/sessions/111.abc.key")
+printf '{"pid":222,"name":"alt-b"}\n' > "$HOME/.claude-alt/sessions/222.json"
+(umask 077; printf '{"peerToken":"y"}\n' > "$HOME/.claude-alt/sessions/222.def.key")
+t "default is per account"
+out="$(bash "$SETUP" doctor 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "peer-session registry per account"
+out="$(bash "$SETUP" status 2>&1)"; assert_contains "$out" "peer sessions: per account"
+t "share-sessions --dry-run changes nothing"
+out="$(bash "$SETUP" share-sessions --dry-run 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "[dry-run]"
+assert_absent "$HOME/.claude-shared/sessions"
+assert_dir "$HOME/.claude/sessions"
+assert_file "$HOME/.claude-alt/sessions/222.json"
+t "share-sessions"
+out="$(bash "$SETUP" share-sessions 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_not_contains "$out" " warn "
+assert_dir "$HOME/.claude-shared/sessions"
+assert_eq "$(stat -c %a "$HOME/.claude-shared/sessions")" "700" "shared registry mode 0700"
+for p in .claude .claude-alt .claude-work; do assert_link "$HOME/$p/sessions" "$HOME/.claude-shared/sessions"; done
+for f in 111.json 111.abc.key 222.json 222.def.key; do assert_file "$HOME/.claude-shared/sessions/$f"; done
+assert_eq "$(stat -c %a "$HOME/.claude-shared/sessions/222.def.key")" "600" "peer token keeps mode 0600"
+assert_eq "$(cat "$HOME/.claude-shared/sessions/222.json")" '{"pid":222,"name":"alt-b"}' "entry content intact"
+assert_eq "$(find "$HOME" -maxdepth 2 -name 'sessions.bak-*' | wc -l | tr -d ' ')" "0" "emptied dirs need no backup"
+t "a session writing through its own profile path lands in the shared registry"
+printf '{"pid":333}\n' > "$HOME/.claude-work/sessions/333.json"
+assert_file "$HOME/.claude-shared/sessions/333.json"
+assert_eq "$(ls "$HOME/.claude/sessions" | sort | tr '\n' ' ')" "111.abc.key 111.json 222.def.key 222.json 333.json " "main lists every account's entries"
+t "idempotent"
+out="$(bash "$SETUP" share-sessions 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_not_contains "$out" "moved"
+assert_not_contains "$out" " warn "
+t "add-profile after sharing joins automatically"
+bash "$SETUP" add-profile ci >/dev/null 2>&1; assert_rc $? 0
+assert_link "$HOME/.claude-ci/sessions" "$HOME/.claude-shared/sessions"
+t "re-running install keeps sharing on"
+out="$(bash "$SETUP" install --no-install --profiles alt,work 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "peer-session registry: shared"
+assert_link "$HOME/.claude-alt/sessions" "$HOME/.claude-shared/sessions"
+t "doctor and status report sharing"
+out="$(bash "$SETUP" doctor 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "peer-session registry shared at ~/.claude-shared/sessions"
+out="$(bash "$SETUP" status 2>&1)"; assert_contains "$out" "peer sessions: shared across accounts"
+t "doctor fails when a profile drops out of the shared registry"
+rm "$HOME/.claude-alt/sessions"; mkdir "$HOME/.claude-alt/sessions"
+out="$(bash "$SETUP" doctor 2>&1)"; rc=$?
+assert_rc "$rc" 1
+assert_contains "$out" "profile 'alt': ~/.claude-alt/sessions is not linked to the shared registry"
+t "share-sessions repairs it and never overwrites a shared entry"
+printf '{"pid":111,"stale":true}\n' > "$HOME/.claude-alt/sessions/111.json"   # same pid as a shared entry
+printf '{"pid":444}\n' > "$HOME/.claude-alt/sessions/444.json"
+out="$(bash "$SETUP" share-sessions 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "already exist in the shared registry"
+assert_link "$HOME/.claude-alt/sessions" "$HOME/.claude-shared/sessions"
+assert_eq "$(cat "$HOME/.claude-shared/sessions/111.json")" '{"pid":111,"name":"main-a"}' "shared entry untouched"
+assert_file "$HOME/.claude-shared/sessions/444.json"
+assert_eq "$(find "$HOME/.claude-alt" -maxdepth 1 -name 'sessions.bak-*' | wc -l | tr -d ' ')" "1" "conflicting local dir kept as backup"
+assert_eq "$(cat "$HOME"/.claude-alt/sessions.bak-*/111.json)" '{"pid":111,"stale":true}' "backup content intact"
+t "doctor warns about a wrong mode on the shared registry"
+chmod 0755 "$HOME/.claude-shared/sessions"
+out="$(bash "$SETUP" doctor 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "has mode 755, expected 0700"
+t "share-sessions restores the mode"
+bash "$SETUP" share-sessions >/dev/null 2>&1
+assert_eq "$(stat -c %a "$HOME/.claude-shared/sessions")" "700" "mode restored"
+t "export never packs the registry"
+out="$(bash "$EXPORT" -o "$SANDBOX/bundle-sessions.tgz" 2>&1)"; rc=$?
+assert_rc "$rc" 0
+listing="$(tar -tzf "$SANDBOX/bundle-sessions.tgz")"
+assert_not_contains "$listing" "sessions/"
+assert_not_contains "$listing" ".key"
+t "import refuses a bundle carrying peer tokens"
+mkdir -p "$SANDBOX/badsess/sessions"; echo t > "$SANDBOX/badsess/sessions/1.abc.key"; tar -czf "$SANDBOX/badsess.tgz" -C "$SANDBOX/badsess" .
+bash "$SETUP" install --no-install --bundle "$SANDBOX/badsess.tgz" >/dev/null 2>&1; assert_rc $? 1
+t "an unregistered ~/.claude-<name> dir is reported and left alone"
+mkdir -p "$HOME/.claude-hand/sessions"; echo '{}' > "$HOME/.claude-hand/.claude.json"; echo '{"pid":555}' > "$HOME/.claude-hand/sessions/555.json"
+out="$(bash "$SETUP" share-sessions 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "~/.claude-hand holds an account but is not a registered profile"
+assert_dir "$HOME/.claude-hand/sessions"
+out="$(bash "$SETUP" doctor 2>&1)"; assert_contains "$out" "~/.claude-hand holds an account but is not a registered profile"
+t "registering it brings it in"
+bash "$SETUP" add-profile hand >/dev/null 2>&1; assert_rc $? 0
+assert_link "$HOME/.claude-hand/sessions" "$HOME/.claude-shared/sessions"
+assert_file "$HOME/.claude-shared/sessions/555.json"
+out="$(bash "$SETUP" doctor 2>&1)"; rc=$?; assert_rc "$rc" 0; assert_not_contains "$out" "not a registered profile"
+t "share-sessions before install refuses"
+HOME="$SANDBOX/home-none" bash "$SETUP" share-sessions >/dev/null 2>&1; assert_rc $? 1
+
+echo "[T15] install --share-sessions on a fresh home (seventh home)"
+export HOME="$SANDBOX/home7"; mkdir -p "$HOME"; touch "$HOME/.bashrc"
+t "install --share-sessions"
+out="$(bash "$SETUP" install --no-install --share-sessions --profiles alt 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "peer-session registry: shared"
+assert_dir "$HOME/.claude-shared/sessions"
+assert_eq "$(stat -c %a "$HOME/.claude-shared/sessions")" "700" "mode 0700"
+assert_link "$HOME/.claude/sessions" "$HOME/.claude-shared/sessions"
+assert_link "$HOME/.claude-alt/sessions" "$HOME/.claude-shared/sessions"
+t "install --share-sessions --dry-run on an untouched home creates nothing"
+export HOME="$SANDBOX/home8"; mkdir -p "$HOME"; touch "$HOME/.bashrc"
+out="$(bash "$SETUP" install --no-install --share-sessions --dry-run 2>&1)"; rc=$?
+assert_rc "$rc" 0
+assert_contains "$out" "[dry-run]"
+assert_absent "$HOME/.claude-shared"
+assert_absent "$HOME/.claude"
+
+# ======================================================================================
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

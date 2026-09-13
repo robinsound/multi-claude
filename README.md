@@ -5,8 +5,8 @@ account, `claude alt` for the alternate, `claude <name>` for any other, with one
 set of instructions, settings and hooks.
 
 - `setup-multi-claude.sh` -- run on the target VM from a clone of this repo (`install`,
-  `status`, `doctor`, `add-profile`, `sync-mcp`, `link-memory`, `exec`). Installs itself
-  as `claude-profiles`.
+  `status`, `doctor`, `add-profile`, `share-sessions`, `sync-mcp`, `link-memory`, `exec`).
+  Installs itself as `claude-profiles`.
 - `export-shared-bundle.sh` -- run on a configured machine to carry `~/.claude-shared`
   over (no credentials).
 - `tests/run-tests.sh` -- sandboxed self-test.
@@ -33,3 +33,6 @@ cd ~/apps/multi-claude && git pull && ./setup-multi-claude.sh install
 
 No git on the VM? `scp setup-multi-claude.sh <user>@<vm>:~/` and run
 `bash ~/setup-multi-claude.sh install` instead; everything else is identical.
+
+Optional: `claude-profiles share-sessions` lets Claude Code sessions of all accounts list
+and message each other, the way sessions of one account already do (RUNBOOK section 5d).

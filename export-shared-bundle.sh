@@ -65,13 +65,13 @@ done < <(find "$SHARED_DIR" -type l -print0)
 [ "$outside" -eq 0 ] || printf '  (%d symlink(s) point outside %s; the importer rewrites %s to the target home in their targets)\n' "$outside" "$SHARED_DIR" "$HOME"
 
 tar_opts=(-czf "$OUT"
-  --exclude='./claude-profiles.sh' --exclude='./profiles'
+  --exclude='./claude-profiles.sh' --exclude='./profiles' --exclude='./sessions'
   --exclude='__pycache__' --exclude='*.pyc' --exclude='*.bak-*'
   --exclude='.credentials.json' --exclude='.claude.json')
 [ "$DEREF" -eq 1 ] && tar_opts+=(-h)
 tar "${tar_opts[@]}" "${excludes[@]+"${excludes[@]}"}" -C "$SHARED_DIR" . -C "$tmp" .bundle-meta
 
-if tar -tzf "$OUT" | grep -qE '(^|/)(\.credentials\.json|\.claude\.json)$'; then
+if tar -tzf "$OUT" | grep -qE '(^|/)(\.credentials\.json|\.claude\.json)$|(^|/)sessions/[^/]+\.key$'; then
   rm -f "$OUT"; die "archive contained credential/state files; aborted and removed"
 fi
 

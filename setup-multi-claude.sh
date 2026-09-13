@@ -13,6 +13,11 @@
 # permissions and hooks are written once. Credentials, sessions, project memory and
 # plugins stay per account.
 #
+# Opt-in (`install --share-sessions`, or `claude-profiles share-sessions` later): one
+# peer-session registry for every profile, so Claude Code sessions of different accounts
+# can list and message each other (ListAgents / SendMessage) exactly like sessions of one
+# account do. Off by default; `doctor` reports which mode is active.
+#
 # Idempotent: `install` can be re-run at any time. Nothing is deleted; anything that
 # has to move out of the way is renamed to <name>.bak-<timestamp>.
 #
@@ -30,6 +35,7 @@ MAIN_DIR="$HOME/.claude"
 BIN_DIR="$HOME/.local/bin"
 WRAPPER_FILE="$SHARED_DIR/claude-profiles.sh"
 REGISTRY_FILE="$SHARED_DIR/profiles"
+SHARED_SESSIONS="$SHARED_DIR/sessions"   # exists only when the peer-session registry is shared (opt-in)
 SELF_NAME="claude-profiles"
 
 SHARED_FILES="CLAUDE.md settings.json"
@@ -46,6 +52,7 @@ UPGRADE=0
 CLAUDE_VERSION=""
 SHELL_CHOICE="auto"
 BUNDLE=""
+SHARE_SESSIONS=0
 PROFILES="alt"
 TS="$(date +%Y%m%d-%H%M%S)"
 FAILS=0
@@ -198,12 +205,92 @@ link_profile_dir() {   # create a profile dir and wire every shared item into it
   for item in $SHARED_OPTIONAL_FILES; do link_shared_item "$pdir" "$item" optional-file; done
 }
 
+# ------------------------------------------------------------------ peer-session registry
+# Claude Code registers every running session in <config dir>/sessions/<pid>.json (+ a
+# <pid>.<hash>.key peer token, mode 0600) and discovers peers by reading that directory.
+# The message transport, a per-process unix socket under /run/user/<uid>/cc-socks, is
+# already shared by every profile of one OS user. Pointing every profile's sessions/ at
+# one shared directory therefore makes sessions of all accounts see and message each other.
+sessions_shared() { [ -d "$SHARED_SESSIONS" ] && [ ! -L "$SHARED_SESSIONS" ]; }
+
+ensure_shared_sessions_dir() {
+  if [ -d "$SHARED_SESSIONS" ]; then
+    [ "$(stat -c %a "$SHARED_SESSIONS" 2>/dev/null)" = 700 ] || run chmod 0700 -- "$SHARED_SESSIONS"
+    ok "shared registry $(tilde "$SHARED_SESSIONS")"
+  else
+    run mkdir -p -m 0700 -- "$SHARED_SESSIONS"
+    ok "created shared registry $(tilde "$SHARED_SESSIONS") (mode 0700)"
+  fi
+}
+
+# share_sessions_dir PROFILE_DIR : replace PROFILE_DIR/sessions with a symlink to the shared
+# registry. Entries of running sessions are moved, not copied: a session keeps writing to
+# the same relative path, which now resolves inside the shared directory, so nothing has to
+# be restarted. An entry that already exists in the shared registry is never overwritten.
+share_sessions_dir() {
+  local pdir="$1" f n=0 kept=0
+  local src="$SHARED_SESSIONS" dst="$1/sessions"
+  if [ -L "$dst" ]; then
+    if [ "$(readlink "$dst")" = "$src" ]; then ok "$(tilde "$dst") -> $(tilde "$src")"; return 0; fi
+    warn "$(tilde "$dst") pointed to $(readlink "$dst"); re-pointing it to $(tilde "$src")"
+    run rm -- "$dst"
+  elif [ -d "$dst" ]; then
+    for f in "$dst"/* "$dst"/.[!.]*; do
+      [ -e "$f" ] || continue
+      if [ -e "$src/$(basename "$f")" ]; then kept=$((kept + 1)); continue; fi
+      run mv -- "$f" "$src/"; n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] && log "  moved $n registry file(s) from $(tilde "$dst") into $(tilde "$src")"
+    if [ "$kept" -gt 0 ]; then
+      warn "$kept file(s) in $(tilde "$dst") already exist in the shared registry; kept as $(tilde "$dst").bak-$TS (stale entries of exited sessions, most likely)"
+      run mv -- "$dst" "$dst.bak-$TS"
+    else
+      run rmdir -- "$dst"
+    fi
+  elif [ -e "$dst" ]; then
+    warn "$(tilde "$dst") is not a directory; kept as $(tilde "$dst").bak-$TS"
+    run mv -- "$dst" "$dst.bak-$TS"
+  fi
+  run ln -s -- "$src" "$dst"
+  ok "$(tilde "$dst") -> $(tilde "$src")"
+}
+
+# ~/.claude-<name> dirs that hold an account but were never registered (hand-made setups
+# from before this script). They are skipped by everything registry-driven, so say so.
+unregistered_profile_dirs() {
+  local d n
+  for d in "$HOME"/.claude-*/; do
+    d="${d%/}"; n="${d##*/.claude-}"
+    { [ -d "$d" ] && [ ! -L "$d" ]; } || continue
+    case "$n" in shared|*.bak-*) continue ;; esac
+    [ -f "$d/.claude.json" ] || [ -f "$d/.credentials.json" ] || [ -d "$d/sessions" ] || continue
+    is_registered "$n" || printf '%s\n' "$n"
+  done
+}
+warn_unregistered_profiles() {
+  local p
+  for p in $(unregistered_profile_dirs); do
+    warn "$(tilde "$(profile_dir "$p")") holds an account but is not a registered profile, so it is skipped; register it first: $SELF_NAME add-profile $p"
+  done
+}
+
+# every profile dir that should carry the shared registry: main, the registered ones, and
+# (during install) the ones being created now
+session_profile_dirs() {
+  local p
+  # shellcheck disable=SC2086  # $1 is a space-separated list of names; splitting is intended
+  { printf 'main\n'; list_profiles; printf '%s\n' ${1:-}; } | sort -u | while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ -d "$(profile_dir "$p")" ] || [ "$DRY_RUN" -eq 1 ]; then profile_dir "$p"; printf '\n'; fi
+  done
+}
+
 # ------------------------------------------------------------------ bundle seeding ----
 seed_bundle() {
   local bundle="$1" listing src_home
   [ -f "$bundle" ] || die "bundle not found: $bundle"
   listing="$(tar -tzf "$bundle")" || die "cannot read bundle $bundle"
-  if printf '%s\n' "$listing" | grep -qE '(^|/)(\.credentials\.json|\.claude\.json)$'; then
+  if printf '%s\n' "$listing" | grep -qE '(^|/)(\.credentials\.json|\.claude\.json)$|(^|/)sessions/[^/]+\.key$'; then
     die "refusing bundle $bundle: it contains credential/state files"
   fi
   if printf '%s\n' "$listing" | grep -qE '^/|(^|/)\.\.(/|$)'; then
@@ -391,7 +478,7 @@ self_install() {
 
 # ================================================================== commands ==========
 cmd_install() {
-  local p
+  local p dir
   log "multi-claude setup v$VERSION  home=$(tilde "$HOME")  profiles: main ${PROFILES//,/ }"
   [ "$(id -u)" -eq 0 ] && warn "running as root: everything lands in $HOME. Run as the user who will use claude."
   for p in ${PROFILES//,/ }; do validate_name "$p"; done
@@ -411,6 +498,13 @@ cmd_install() {
     link_profile_dir "$(profile_dir "$p")"
     ensure_registered "$p"
   done
+  if [ "$SHARE_SESSIONS" -eq 1 ] || sessions_shared; then
+    log "  peer-session registry: shared (sessions of every account see each other)"
+    ensure_shared_sessions_dir
+    while IFS= read -r dir; do [ -n "$dir" ] && share_sessions_dir "$dir"; done < <(session_profile_dirs "${PROFILES//,/ }")
+  else
+    log "  peer-session registry: per profile (opt in with --share-sessions)"
+  fi
 
   log "[5/6] shell wrapper"
   write_wrapper
@@ -442,6 +536,7 @@ cmd_add_profile() {
   [ -d "$SHARED_DIR" ] || die "$(tilde "$SHARED_DIR") does not exist; run 'install' first"
   link_profile_dir "$(profile_dir "$p")"
   ensure_registered "$p"
+  if sessions_shared; then share_sessions_dir "$(profile_dir "$p")"; fi
   log ""
   log "log in the new account with:   claude $p        then type /login   (or: claude $p auth login)"
 }
@@ -450,7 +545,7 @@ cmd_status() {
   local p dir state json logged email org sub ver
   command -v claude >/dev/null 2>&1 || die "claude is not on PATH"
   ver="$(claude --version 2>/dev/null | head -1)"
-  log "claude $ver   wrapper: $(tilde "$WRAPPER_FILE")   registry: $(tilde "$REGISTRY_FILE")"
+  log "claude $ver   wrapper: $(tilde "$WRAPPER_FILE")   registry: $(tilde "$REGISTRY_FILE")   peer sessions: $(sessions_shared && printf 'shared across accounts' || printf 'per account')"
   printf '%-10s %-24s %-11s %-34s %-16s %s\n' PROFILE CONFIG_DIR LOGGED_IN ACCOUNT ORG SUBSCRIPTION
   for p in main $(list_profiles); do
     dir="$(profile_dir "$p")"; state="$(profile_state_file "$p")"
@@ -476,7 +571,7 @@ cmd_status() {
 }
 
 cmd_doctor() {
-  local p dir item src dst rc n want ver
+  local p dir item src dst rc n want ver mode
   log "multi-claude doctor  home=$(tilde "$HOME")"
 
   if command -v claude >/dev/null 2>&1; then
@@ -544,6 +639,22 @@ cmd_doctor() {
   done
   if [ -f "$MAIN_DIR/.claude.json" ]; then
     warn "$(tilde "$MAIN_DIR/.claude.json") exists: something ran with CLAUDE_CONFIG_DIR=~/.claude. Never set that for main; its state lives in ~/.claude.json"
+  fi
+  warn_unregistered_profiles
+
+  # peer-session registry (shared only when opted in)
+  if sessions_shared; then
+    mode="$(stat -c %a "$SHARED_SESSIONS" 2>/dev/null || printf '?')"
+    if [ "$mode" = 700 ]; then ok "peer-session registry shared at $(tilde "$SHARED_SESSIONS") (mode 0700)"
+    else warn "$(tilde "$SHARED_SESSIONS") has mode $mode, expected 0700: chmod 0700 $(tilde "$SHARED_SESSIONS")"; fi
+    for p in main $(list_profiles); do
+      dir="$(profile_dir "$p")"; dst="$dir/sessions"
+      [ -d "$dir" ] || continue
+      if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$SHARED_SESSIONS" ]; then :
+      else fail "profile '$p': $(tilde "$dst") is not linked to the shared registry (its sessions are invisible to the other accounts); run: $SELF_NAME share-sessions"; fi
+    done
+  else
+    ok "peer-session registry per account (sessions of different accounts do not see each other; opt in: $SELF_NAME share-sessions)"
   fi
 
   # shared dir health
@@ -660,6 +771,20 @@ cmd_exec() {
   exec env CLAUDE_CONFIG_DIR="$(profile_dir "$p")" claude "$@"
 }
 
+cmd_share_sessions() {
+  local dir
+  [ -d "$SHARED_DIR" ] || die "$(tilde "$SHARED_DIR") does not exist; run 'install' first"
+  log "sharing the peer-session registry: every profile's sessions/ -> $(tilde "$SHARED_SESSIONS")"
+  warn_unregistered_profiles
+  ensure_shared_sessions_dir
+  while IFS= read -r dir; do [ -n "$dir" ] && share_sessions_dir "$dir"; done < <(session_profile_dirs)
+  log ""
+  if [ "$FAILS" -gt 0 ]; then log "finished with $FAILS failure(s); fix them and re-run"; return 1; fi
+  log "done. Sessions of every account now list and message each other (ListAgents / SendMessage);"
+  log "running sessions were carried over and need no restart. Profiles added later join automatically."
+  log "undo: see RUNBOOK.md section 5d."
+}
+
 cmd_help() {
   cat <<EOF
 setup-multi-claude.sh v$VERSION - several Claude Code accounts on one machine
@@ -674,12 +799,17 @@ commands
                           after every git pull to refresh that copy.
       --profiles a,b      extra account profiles (default: alt) -> ~/.claude-<name>
       --bundle FILE       seed ~/.claude-shared from export-shared-bundle.sh output
+      --share-sessions    one peer-session registry for all profiles: Claude Code sessions of
+                          different accounts can list and message each other (ListAgents /
+                          SendMessage). Off by default; see share-sessions below
       --shell auto|bash|zsh|both   which rc files get the source line (default: auto)
       --claude-version V  latest | stable | x.y.z for the native installer
       --no-install        do not download Claude Code
       --upgrade           re-run the installer even if claude exists
       --dry-run           print what would change; touch nothing
   add-profile <name>      add one more account profile (no shell reload needed)
+  share-sessions          opt in later to the shared peer-session registry (same effect as
+                          install --share-sessions; safe while sessions are running)
   status                  which account each profile is logged in as
   doctor                  verify binary, wrapper, rc files, symlinks, hooks; exit 1 on failure
   sync-mcp <from> <to>    copy user-scope MCP servers between profiles on this host
@@ -710,6 +840,7 @@ case "$cmd" in
         --claude-version) CLAUDE_VERSION="${2:-}"; shift 2 ;;
         --claude-version=*) CLAUDE_VERSION="${1#*=}"; shift ;;
         --no-install) NO_INSTALL=1; shift ;;
+        --share-sessions) SHARE_SESSIONS=1; shift ;;
         --upgrade) UPGRADE=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) cmd_help; exit 0 ;;
@@ -719,6 +850,7 @@ case "$cmd" in
     [ -n "$PROFILES" ] || die "--profiles needs at least one name"
     cmd_install ;;
   add-profile)   [ "${2:-}" = --dry-run ] && DRY_RUN=1; cmd_add_profile "${1:-}" ;;
+  share-sessions) [ "${1:-}" = --dry-run ] && DRY_RUN=1; cmd_share_sessions ;;
   status)        cmd_status ;;
   doctor)        cmd_doctor ;;
   sync-mcp)      [ "${3:-}" = --dry-run ] && DRY_RUN=1; cmd_sync_mcp "${1:-}" "${2:-}" ;;
