@@ -78,6 +78,9 @@ fi
 n="$(tar -tzf "$OUT" | wc -l | tr -d ' ')"
 size="$(du -h "$OUT" | cut -f1)"
 printf 'wrote %s (%s, %s entries)\n' "$OUT" "$size" "$n"
-printf '\nnext, on the other machine:\n'
-printf '  scp %s setup-multi-claude.sh <user>@<vm>:~/\n' "$OUT"
-printf '  ssh <user>@<vm> "bash ~/setup-multi-claude.sh install --bundle ~/%s"\n' "$(basename "$OUT")"
+repo_url="$(git -C "$(dirname "$0")" remote get-url origin 2>/dev/null || printf '<repo-url>')"
+printf '\nnext, on the other machine (RUNBOOK.md section 3):\n'
+printf '  scp %s <user>@<vm>:~/\n' "$OUT"
+printf '  ssh -A <user>@<vm>\n'
+printf '  git clone %s ~/apps/multi-claude        # once\n' "$repo_url"
+printf '  cd ~/apps/multi-claude && ./setup-multi-claude.sh install --bundle ~/%s\n' "$(basename "$OUT")"

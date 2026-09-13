@@ -16,8 +16,9 @@
 # Idempotent: `install` can be re-run at any time. Nothing is deleted; anything that
 # has to move out of the way is renamed to <name>.bak-<timestamp>.
 #
-# Run `setup-multi-claude.sh help` for usage. After `install` the script is also
-# available as `claude-profiles` (copied to ~/.local/bin).
+# Run it from a clone of the repo (e.g. ~/apps/multi-claude): `./setup-multi-claude.sh help`
+# for usage. After `install` the script is also available as `claude-profiles` (a copy in
+# ~/.local/bin); after `git pull`, re-run `install` from the clone to refresh that copy.
 set -euo pipefail
 
 VERSION="1.0.0"
@@ -668,7 +669,9 @@ usage: $(basename "$0") <command> [options]
 commands
   install                 install Claude Code if missing, create ~/.claude-shared, wire the
                           main and extra profile dirs, install the claude() shell wrapper,
-                          copy this script to ~/.local/bin/$SELF_NAME. Idempotent.
+                          copy this script to ~/.local/bin/$SELF_NAME. Idempotent: run it
+                          from the repo clone (e.g. ~/apps/multi-claude) and re-run it
+                          after every git pull to refresh that copy.
       --profiles a,b      extra account profiles (default: alt) -> ~/.claude-<name>
       --bundle FILE       seed ~/.claude-shared from export-shared-bundle.sh output
       --shell auto|bash|zsh|both   which rc files get the source line (default: auto)

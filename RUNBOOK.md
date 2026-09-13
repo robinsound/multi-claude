@@ -8,7 +8,7 @@ Files in this folder:
 
 | File | Run where | Purpose |
 |------|-----------|---------|
-| `setup-multi-claude.sh` | new VM | installs Claude Code, wires the profiles, installs the `claude()` wrapper. Idempotent. Installs itself as `claude-profiles`. |
+| `setup-multi-claude.sh` | new VM, from the clone (`~/apps/multi-claude`) | installs Claude Code, wires the profiles, installs the `claude()` wrapper. Idempotent. Installs itself as `claude-profiles`. |
 | `export-shared-bundle.sh` | this machine (optional) | packs `~/.claude-shared` so the new VM starts with the same instructions, hooks and settings. Never includes credentials. |
 | `tests/run-tests.sh` | anywhere | sandboxed self-test (fake HOME, fake `claude`, fake `curl`). Run it after editing the scripts. |
 
@@ -50,31 +50,60 @@ file on every call, so a new profile works without reopening the shell. The bare
 
 ## 3. Install
 
-### 3a. Optional: export the shared config from this machine
+The scripts run from a clone of this repository on the new VM. The examples use
+`~/apps/multi-claude`; any path works, but keep the clone: it is where updates are pulled
+and where `install` is re-run (section 3f).
+
+### 3a. Clone the repo on the new VM
+
+The repository is private. Either forward your SSH agent when you connect, or sign in
+with the GitHub CLI once on the VM:
 
 ```bash
-cd ~/robin/multi-claude
-./export-shared-bundle.sh                       # -> ./multi-claude-shared-<host>-<ts>.tar.gz
+ssh -A <user>@<vm>                                            # -A forwards your SSH agent
+mkdir -p ~/apps
+git clone git@github.com:robinsound/multi-claude.git ~/apps/multi-claude
+
+# without SSH keys on the VM:
+gh auth login && gh repo clone robinsound/multi-claude ~/apps/multi-claude
 ```
 
+No git on the VM at all? Copy the one script and substitute `bash ~/setup-multi-claude.sh`
+for `./setup-multi-claude.sh` in every command below:
+
+```bash
+scp setup-multi-claude.sh <user>@<vm>:~/
+```
+
+### 3b. Optional: bring the shared config from this machine
+
+On the machine that already has the working setup (here: `~/robin/multi-claude`):
+
+```bash
+cd ~/apps/multi-claude                          # this machine's clone
+./export-shared-bundle.sh                       # -> ./multi-claude-shared-<host>-<ts>.tar.gz
+scp multi-claude-shared-*.tar.gz <user>@<vm>:~/
+```
+
+The archive lands in the clone and is ignored by git (`.gitignore`). Never commit it: it
+carries your settings and hooks. It never contains `.credentials.json` or `.claude.json`.
+
 It lists symlinks that point outside `~/.claude-shared` (they dangle on the target unless
-the same path exists there; add `--dereference` to copy their content instead). The
-archive never contains `.credentials.json` or `.claude.json`.
+the same path exists there; add `--dereference` to copy their content instead).
 
 Review before shipping: `settings.json` carries the permission allow-list and hook
 commands; hooks may reference tools the new VM lacks (codebase-memory-mcp, herdr,
 claude-powerline). `claude-profiles doctor` on the target reports every such reference.
 
-### 3b. Copy and run
+### 3c. Run the installer from the clone
 
 ```bash
-scp setup-multi-claude.sh [multi-claude-shared-*.tar.gz] <user>@<vm>:~/
-ssh <user>@<vm>
-bash ~/setup-multi-claude.sh install                       # profiles: main + alt
+cd ~/apps/multi-claude
+./setup-multi-claude.sh install                                    # profiles: main + alt
 # or:
-bash ~/setup-multi-claude.sh install --bundle ~/multi-claude-shared-*.tar.gz
-bash ~/setup-multi-claude.sh install --profiles alt,work   # three accounts
-bash ~/setup-multi-claude.sh install --dry-run             # show the plan, change nothing
+./setup-multi-claude.sh install --bundle ~/multi-claude-shared-*.tar.gz
+./setup-multi-claude.sh install --profiles alt,work                # three accounts
+./setup-multi-claude.sh install --dry-run                          # show the plan, change nothing
 ```
 
 What `install` does, in order:
@@ -91,11 +120,12 @@ What `install` does, in order:
 4. Writes `~/.claude-shared/claude-profiles.sh` and adds a 3-line block to the rc
    file(s) (`--shell auto|bash|zsh|both`; auto = the rc files that exist plus the login
    shell's).
-5. Copies itself to `~/.local/bin/claude-profiles`.
+5. Copies itself to `~/.local/bin/claude-profiles`. It is a copy, not a link, so the
+   clone can move or disappear without breaking the command (see 3f for updates).
 
 Nothing is deleted. Re-running is safe and repairs broken symlinks.
 
-### 3c. Log in each account
+### 3d. Log in each account
 
 ```bash
 exec $SHELL -l                 # or: source ~/.zshrc / source ~/.bashrc
@@ -111,7 +141,7 @@ account use a private browser window (or log out of the main account first) so t
 authorization is granted to the correct account. `claude alt auth login --email <alt-email>`
 pre-fills the address.
 
-### 3d. Verify
+### 3e. Verify
 
 ```bash
 claude-profiles status
@@ -121,6 +151,28 @@ claude-profiles status
 
 claude-profiles doctor         # exit 0 = wiring is correct; warnings are advisory
 ```
+
+### 3f. Updating later
+
+`~/.local/bin/claude-profiles` and the wrapper in `~/.claude-shared` are written at
+install time, so a `git pull` alone changes nothing on the host. Pull, then re-run
+`install` from the clone; it refreshes both and repairs the wiring:
+
+```bash
+cd ~/apps/multi-claude && git pull
+tests/run-tests.sh                        # optional: ~5 s, sandboxed, touches no real config
+./setup-multi-claude.sh install
+```
+
+If you would rather have `git pull` take effect immediately, replace the copy with a
+link once. `install` recognises the link and leaves it alone:
+
+```bash
+ln -sfn ~/apps/multi-claude/setup-multi-claude.sh ~/.local/bin/claude-profiles
+```
+
+The clone must then stay where it is; a moved or deleted clone leaves a dangling command.
+Changes to the generated wrapper still need one `./setup-multi-claude.sh install`.
 
 ## 4. Daily use
 
@@ -188,6 +240,7 @@ claude-profiles link-memory ~/att/video/playback alt      # only alt
 | dangling symlink warnings in `~/.claude-shared/skills` | the bundle kept links to repo paths that do not exist here | clone the repo to the same relative path, re-export with `--dereference`, or remove the link |
 | `settings.json.bak-<ts>` appeared in a profile dir | that profile had its own settings that differed from the shared copy | diff and merge by hand, then delete the backup |
 | a login shell on the new VM cannot see `claude` at all | `~/.local/bin` not on PATH yet | `exec $SHELL -l`; the wrapper file also prepends it |
+| `claude-profiles` lacks a subcommand or fix that is in the repo | `~/.local/bin/claude-profiles` is a copy taken at install time; `git pull` does not update it | `cd ~/apps/multi-claude && git pull && ./setup-multi-claude.sh install` (section 3f) |
 
 Uninstall (keeps every account logged in):
 
@@ -196,6 +249,7 @@ sed -i '/# >>> multi-claude >>>/,/# <<< multi-claude <<</d' ~/.zshrc ~/.bashrc
 rm ~/.claude-shared/claude-profiles.sh ~/.local/bin/claude-profiles
 # ~/.claude, ~/.claude-alt and the symlinks into ~/.claude-shared keep working as they are;
 # plain `CLAUDE_CONFIG_DIR=~/.claude-alt claude` still opens the alt account.
+# The clone (~/apps/multi-claude) can stay or go; nothing points at it unless you made the 3f link.
 ```
 
 ## 7. Changing the scripts
@@ -222,3 +276,4 @@ rewriting, and shellcheck.
   alt: `robin.claude@attention.tech` (`~/.claude-alt`).
 - Shared: `~/.claude-shared/{CLAUDE.md,settings.json,hooks,commands,rules,skills,claude-powerline.json}`.
 - Claude Code 2.1.270, native install at `~/.local/bin/claude`.
+- Clone of this repo: `~/robin/multi-claude` (origin `robinsound/multi-claude`, private).

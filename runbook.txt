@@ -14,11 +14,14 @@ What I found on this machine. claude alt works through a claude() shell function
   checks pass in about 4 seconds, shellcheck is clean on both scripts, and importing this machine's real shared config into a foreign home gives a passing doctor whose only warnings are genuine (statusline binary absent, two repo-path skills
   dangling, one hook hardcoding /home/robin).
 
-  To use it on the other VM
+  To use it on the other VM (install from a clone of the repo, e.g. ~/apps/multi-claude)
 
-  cd ~/robin/multi-claude && ./export-shared-bundle.sh      # optional
-  scp setup-multi-claude.sh multi-claude-shared-*.tar.gz <user>@<vm>:~/
-  ssh <user>@<vm> 'bash ~/setup-multi-claude.sh install --bundle ~/multi-claude-shared-*.tar.gz'
+  cd ~/robin/multi-claude && ./export-shared-bundle.sh      # optional; writes ./multi-claude-shared-*.tar.gz (gitignored)
+  scp multi-claude-shared-*.tar.gz <user>@<vm>:~/           # optional
+  ssh -A <user>@<vm>                                        # -A forwards the SSH agent; the repo is private
+  git clone git@github.com:robinsound/multi-claude.git ~/apps/multi-claude
+  cd ~/apps/multi-claude && ./setup-multi-claude.sh install --bundle ~/multi-claude-shared-*.tar.gz
   # then on the VM: exec $SHELL -l; claude (/login); claude alt (/login); claude-profiles status
+  # later: cd ~/apps/multi-claude && git pull && ./setup-multi-claude.sh install
 
   Two things I could not test here: the real OAuth login on a fresh host, and the real installer download (the harness stubs both). The runbook walks through the headless login flow.
