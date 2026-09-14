@@ -367,8 +367,8 @@ bundle export/import with home rewriting, and shellcheck.
 - Wrapper: since 2026-09-13 the generated `~/.claude-shared/claude-profiles.sh`, sourced
   by the managed block at the end of `~/.zshrc` (this machine was installed with the
   script itself, sharing on). The older hand-made `claude()` in `~/.local/bin/env`
-  (rebuilt 2026-09-04 after PL-3342, knows only `alt`) is still sourced earlier in
-  `~/.zshrc` and is shadowed; it can be deleted at leisure.
+  (rebuilt 2026-09-04 after PL-3342, knew only `alt`) was removed the same day; a
+  backup sits next to the file as `env.bak-<ts>`.
 - main: `robin@attention.tech` (`~/.claude`, state `~/.claude.json`);
   alt: `robin.claude@attention.tech` (`~/.claude-alt`).
 - Shared: `~/.claude-shared/{CLAUDE.md,settings.json,hooks,commands,rules,skills,claude-powerline.json}`.
